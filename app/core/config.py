@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     JWT_ACCESS_EXPIRATION: str = "15m"
     JWT_REFRESH_EXPIRATION: str = "7d"
 
+    # Redis
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_PASSWORD: Optional[str] = None
+    CACHE_TTL_DEFAULT: int = 300
+
     # Yandex OAuth
     YANDEX_CLIENT_ID: str = "aef65f68dbaf46a0a0f2af20ce216d72"
     YANDEX_CLIENT_SECRET: str = "daa09f23542b437fb0fced37249809a9"

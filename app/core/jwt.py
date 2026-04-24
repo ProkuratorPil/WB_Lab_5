@@ -1,17 +1,18 @@
 """
 Модуль для работы с JWT токенами.
 Генерирует и валидирует Access и Refresh токены.
+Access токен содержит JTI (JWT ID) для возможности отзыва через Redis.
 """
 import jwt
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
-from typing import Optional
+from uuid import UUID, uuid4
+from typing import Optional, Tuple
 from app.core.config import settings
 
 
 class JWTManager:
     """Менеджер для работы с JWT токенами."""
-    
+
     def __init__(
         self,
         access_secret: str = None,
@@ -23,7 +24,7 @@ class JWTManager:
         self.refresh_secret = refresh_secret or settings.JWT_REFRESH_SECRET
         self.access_expires_delta = self._parse_delta(access_expires or settings.JWT_ACCESS_EXPIRATION)
         self.refresh_expires_delta = self._parse_delta(refresh_expires or settings.JWT_REFRESH_EXPIRATION)
-    
+
     @staticmethod
     def _parse_delta(delta_str: str) -> timedelta:
         """Парсит строку формата '15m', '7d', '1h' в timedelta."""
@@ -34,75 +35,78 @@ class JWTManager:
             'd': 86400,
             'w': 604800
         }
-        
+
         unit = delta_str[-1].lower()
         value = int(delta_str[:-1])
-        
+
         if unit not in units:
             raise ValueError(f"Unknown time unit: {unit}")
-        
+
         return timedelta(seconds=value * units[unit])
-    
-    def create_access_token(self, user_id: UUID) -> tuple[str, datetime]:
+
+    def create_access_token(self, user_id: UUID) -> Tuple[str, datetime, str]:
         """
-        Создаёт Access JWT токен.
-        
+        Создаёт Access JWT токен с JTI.
+
         Returns:
-            Кортеж (токен, дата истечения)
+            Кортеж (токен, дата истечения, jti)
         """
+        jti = str(uuid4())
         expires_at = datetime.now(timezone.utc) + self.access_expires_delta
-        
+
         payload = {
             "sub": str(user_id),
             "type": "access",
+            "jti": jti,
             "exp": expires_at,
             "iat": datetime.now(timezone.utc)
         }
-        
+
         token = jwt.encode(payload, self.access_secret, algorithm="HS256")
-        return token, expires_at
-    
-    def create_refresh_token(self, user_id: UUID) -> tuple[str, datetime]:
+        return token, expires_at, jti
+
+    def create_refresh_token(self, user_id: UUID) -> Tuple[str, datetime]:
         """
         Создаёт Refresh JWT токен.
-        
+
         Returns:
             Кортеж (токен, дата истечения)
         """
         expires_at = datetime.now(timezone.utc) + self.refresh_expires_delta
-        
+
         payload = {
             "sub": str(user_id),
             "type": "refresh",
             "exp": expires_at,
             "iat": datetime.now(timezone.utc)
         }
-        
+
         token = jwt.encode(payload, self.refresh_secret, algorithm="HS256")
         return token, expires_at
-    
+
     def create_token_pair(self, user_id: UUID) -> dict:
         """
         Создаёт пару Access + Refresh токенов.
-        
+
         Returns:
-            Словарь с токенами и метаданными
+            Словарь с токенами и метаданными (включая access_jti)
         """
-        access_token, access_exp = self.create_access_token(user_id)
+        access_token, access_exp, access_jti = self.create_access_token(user_id)
         refresh_token, refresh_exp = self.create_refresh_token(user_id)
-        
+
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,
+            "access_jti": access_jti,
             "token_type": "bearer",
             "access_expires_at": access_exp.isoformat(),
             "refresh_expires_at": refresh_exp.isoformat()
         }
-    
+
     def verify_access_token(self, token: str) -> Optional[dict]:
         """
         Валидирует Access токен.
-        
+
         Returns:
             Payload токена или None если невалиден
         """
@@ -112,20 +116,20 @@ class JWTManager:
                 self.access_secret,
                 algorithms=["HS256"]
             )
-            
+
             if payload.get("type") != "access":
                 return None
-            
+
             return payload
         except jwt.ExpiredSignatureError:
             return None
         except jwt.InvalidTokenError:
             return None
-    
+
     def verify_refresh_token(self, token: str) -> Optional[dict]:
         """
         Валидирует Refresh токен.
-        
+
         Returns:
             Payload токена или None если невалиден
         """
@@ -135,16 +139,16 @@ class JWTManager:
                 self.refresh_secret,
                 algorithms=["HS256"]
             )
-            
+
             if payload.get("type") != "refresh":
                 return None
-            
+
             return payload
         except jwt.ExpiredSignatureError:
             return None
         except jwt.InvalidTokenError:
             return None
-    
+
     def decode_token(self, token: str) -> Optional[dict]:
         """
         Декодирует токен без проверки типа (для отладки).
@@ -171,12 +175,11 @@ def create_tokens(user_id: UUID) -> dict:
     return jwt_manager.create_token_pair(user_id)
 
 
-def verify_access(token: str) -> Optional[UUID]:
-    """Валидирует access токен и возвращает user_id."""
-    payload = jwt_manager.verify_access_token(token)
-    if payload:
-        return UUID(payload["sub"])
-    return None
+def verify_access(token: str) -> Optional[dict]:
+    """
+    Валидирует access токен и возвращает payload (включая jti).
+    """
+    return jwt_manager.verify_access_token(token)
 
 
 def verify_refresh(token: str) -> Optional[UUID]:

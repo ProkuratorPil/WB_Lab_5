@@ -10,6 +10,7 @@ from uuid import UUID
 from app.core.database import get_db
 from app.core.jwt import verify_access, verify_refresh
 from app.core.security import verify_token
+from app.core.cache import cache_service
 from app.models.user import User
 from app.models.token import Token, TokenType
 from app.crud.token_crud import get_token_by_hash
@@ -18,6 +19,16 @@ from app.core.security import hash_token
 
 # Schemes для извлечения токена
 security = HTTPBearer(auto_error=False)
+
+
+def _check_access_jti_in_redis(user_id: UUID, jti: str) -> bool:
+    """
+    Проверяет наличие JTI Access токена в Redis.
+    Если ключа нет — токен отозван или истёк.
+    """
+    key = f"wp:auth:user:{user_id}:access:{jti}"
+    value = cache_service.get(key)
+    return value is not None
 
 
 async def get_current_user(
@@ -29,33 +40,45 @@ async def get_current_user(
     """
     Dependency для получения текущего авторизованного пользователя.
     Проверяет Access Token из Cookie или заголовка Authorization.
+    Проверяет JTI в Redis для возможности мгновенного отзыва.
     """
     token = None
-    
+
     # Пробуем получить из Cookie
     if access_token:
         token = access_token
     # Пробуем получить из заголовка Authorization
     elif credentials:
         token = credentials.credentials
-    
+
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Не авторизован",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Валидируем JWT
-    user_id = verify_access(token)
-    if not user_id:
+    payload = verify_access(token)
+    if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Невалидный или истёкший токен",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Проверяем, что токен не отозван в БД
+
+    user_id = UUID(payload["sub"])
+    jti = payload.get("jti")
+
+    # Проверяем JTI в Redis (мгновенный отзыв)
+    if jti and not _check_access_jti_in_redis(user_id, jti):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Токен был отозван",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Проверяем, что токен не отозван в БД (дополнительный слой)
     token_hash = hash_token(token)
     db_token = get_token_by_hash(db, token_hash)
     if db_token and db_token.is_revoked:
@@ -64,21 +87,21 @@ async def get_current_user(
             detail="Токен был отозван",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Получаем пользователя
     user = db.query(User).filter(
         User.id == user_id,
         User.deleted_at.is_(None),
         User.is_active == True
     ).first()
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Пользователь не найден",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     return user
 
 
@@ -93,18 +116,24 @@ async def get_current_user_optional(
     """
     if not access_token:
         return None
-    
+
     try:
-        user_id = verify_access(access_token)
-        if not user_id:
+        payload = verify_access(access_token)
+        if not payload:
             return None
-        
+
+        user_id = UUID(payload["sub"])
+        jti = payload.get("jti")
+
+        if jti and not _check_access_jti_in_redis(user_id, jti):
+            return None
+
         user = db.query(User).filter(
             User.id == user_id,
             User.deleted_at.is_(None),
             User.is_active == True
         ).first()
-        
+
         return user
     except Exception:
         return None
@@ -139,36 +168,36 @@ async def validate_refresh_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Невалидный или истёкший refresh токен",
         )
-    
+
     # Проверяем токен в БД
     token_hash = hash_token(refresh_token)
     db_token = get_token_by_hash(db, token_hash)
-    
+
     if not db_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Токен не найден в системе",
         )
-    
+
     if db_token.is_revoked:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Токен был отозван",
         )
-    
+
     # Получаем пользователя
     user = db.query(User).filter(
         User.id == user_id,
         User.deleted_at.is_(None),
         User.is_active == True
     ).first()
-    
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Пользователь не найден",
         )
-    
+
     return user, refresh_token
 
 

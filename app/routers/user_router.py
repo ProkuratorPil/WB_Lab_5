@@ -91,7 +91,7 @@ def get_user(
     Доступ: Private (только авторизованные)
     """
     service = UserService(db)
-    user = service.get_by_id(user_id)
+    user = service.get_by_id_cached(user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return user

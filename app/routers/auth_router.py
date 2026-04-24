@@ -9,6 +9,7 @@ from typing import Optional
 import secrets
 
 from app.core.database import get_db
+from app.core.config import settings
 from app.core.jwt import create_tokens, jwt_manager, verify_refresh
 from app.core.security import hash_password, verify_password, hash_token
 from app.core.dependencies import (
@@ -17,6 +18,7 @@ from app.core.dependencies import (
     get_client_ip,
     get_user_agent
 )
+from app.core.cache import cache_service
 from app.core.oauth.providers import OAuthProviderFactory, get_oauth_user_info
 from app.schemas.auth import (
     UserRegister,
@@ -60,6 +62,15 @@ def get_oauth_providers_list(user: User) -> list[str]:
 
 
 def _save_tokens(db: Session, user_id, tokens: dict, ip: str, ua: str):
+    """Сохраняет токены в БД и JTI Access токена в Redis."""
+    access_jti = tokens.get("access_jti")
+    access_ttl = int(jwt_manager.access_expires_delta.total_seconds())
+
+    # Сохраняем JTI в Redis для возможности мгновенного отзыва
+    if access_jti:
+        redis_key = f"wp:auth:user:{user_id}:access:{access_jti}"
+        cache_service.set(redis_key, "valid", ttl=access_ttl)
+
     create_token(
         db=db,
         user_id=user_id,
@@ -78,6 +89,12 @@ def _save_tokens(db: Session, user_id, tokens: dict, ip: str, ua: str):
         ip_address=ip,
         expires_at=datetime.now(timezone.utc) + jwt_manager.refresh_expires_delta
     )
+
+
+def _invalidate_user_session_cache(user_id):
+    """Инвалидирует кеш сессии и профиля пользователя."""
+    cache_service.delete_by_pattern(f"wp:auth:user:{user_id}:access:*")
+    cache_service.delete(f"wp:users:profile:{user_id}")
 
 
 @router.post(
@@ -146,7 +163,8 @@ async def login(response: Response, request: Request, user_data: UserLogin, db: 
     _save_tokens(db, user.id, tokens, ip, ua)
 
     set_auth_cookies(response, tokens["access_token"], tokens["refresh_token"], tokens["access_expires_at"], tokens["refresh_expires_at"])
-    return TokenResponse(**tokens)
+    response_data = {k: v for k, v in tokens.items() if k != "access_jti"}
+    return TokenResponse(**response_data)
 
 
 @router.post(
@@ -173,14 +191,15 @@ async def refresh_tokens(response: Response, request: Request, result: tuple = D
         db.commit()
 
     set_auth_cookies(response, tokens["access_token"], tokens["refresh_token"], tokens["access_expires_at"], tokens["refresh_expires_at"])
-    return TokenResponse(**tokens)
+    response_data = {k: v for k, v in tokens.items() if k != "access_jti"}
+    return TokenResponse(**response_data)
 
 
 @router.get(
     "/whoami",
     response_model=UserProfile,
     summary="Информация о текущем пользователе",
-    description="Возвращает профиль авторизованного пользователя.",
+    description="Возвращает профиль авторизованного пользователя. Использует кеш Redis.",
     response_description="Данные профиля пользователя",
     responses={
         **get_auth_responses(401),
@@ -188,18 +207,25 @@ async def refresh_tokens(response: Response, request: Request, result: tuple = D
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
 async def whoami(current_user: User = Depends(get_current_user)):
-    return UserProfile(
+    cache_key = f"wp:users:profile:{current_user.id}"
+    cached = cache_service.get(cache_key)
+    if cached:
+        return UserProfile(**cached)
+
+    profile = UserProfile(
         id=current_user.id, username=current_user.username, email=current_user.email, phone=current_user.phone,
         is_verified=current_user.is_verified, is_oauth_user=current_user.is_oauth_user,
         created_at=current_user.created_at, oauth_providers=get_oauth_providers_list(current_user)
     )
+    cache_service.set(cache_key, profile.model_dump(mode="json"), ttl=settings.CACHE_TTL_DEFAULT)
+    return profile
 
 
 @router.post(
     "/logout",
     response_model=MessageResponse,
     summary="Выход из системы",
-    description="Завершает текущую сессию: отзывает refresh токен и очищает cookies.",
+    description="Завершает текущую сессию: отзывает refresh токен, удаляет JTI из Redis и очищает cookies.",
     response_description="Подтверждение выхода",
     responses={
         **get_auth_responses(401),
@@ -207,6 +233,14 @@ async def whoami(current_user: User = Depends(get_current_user)):
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
 async def logout(response: Response, request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Инвалидация JTI Access токена в Redis
+    access_token = request.cookies.get("access_token")
+    if access_token:
+        payload = jwt_manager.decode_token(access_token)
+        if payload and payload.get("jti"):
+            jti = payload["jti"]
+            cache_service.delete(f"wp:auth:user:{current_user.id}:access:{jti}")
+
     refresh_token = request.cookies.get("refresh_token")
     if refresh_token:
         token_hash = hash_token(refresh_token)
@@ -214,6 +248,9 @@ async def logout(response: Response, request: Request, current_user: User = Depe
         if token and token.user_id == current_user.id:
             token.is_revoked = True
             db.commit()
+
+    # Инвалидация кеша профиля
+    cache_service.delete(f"wp:users:profile:{current_user.id}")
     clear_auth_cookies(response)
     return MessageResponse(message="Сессия завершена")
 
@@ -222,7 +259,7 @@ async def logout(response: Response, request: Request, current_user: User = Depe
     "/logout-all",
     response_model=MessageResponse,
     summary="Выход из всех сессий",
-    description="Отзывает все токены пользователя и очищает cookies.",
+    description="Отзывает все токены пользователя, удаляет все JTI из Redis и очищает cookies.",
     response_description="Подтверждение отзыва всех сессий",
     responses={
         **get_auth_responses(401),
@@ -231,6 +268,10 @@ async def logout(response: Response, request: Request, current_user: User = Depe
 )
 async def logout_all(response: Response, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     count = revoke_all_user_tokens(db, current_user.id)
+    # Удаляем все JTI пользователя из Redis
+    cache_service.delete_by_pattern(f"wp:auth:user:{current_user.id}:access:*")
+    # Инвалидация кеша профиля
+    cache_service.delete(f"wp:users:profile:{current_user.id}")
     clear_auth_cookies(response)
     return MessageResponse(message="Все сессии завершены", detail=f"Отозвано токенов: {count}")
 

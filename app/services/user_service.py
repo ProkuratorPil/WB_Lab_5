@@ -5,62 +5,82 @@ from uuid import UUID
 from datetime import datetime
 from typing import Optional, Tuple
 from app.models.user import User
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, PaginationParams # <-- Добавлен UserResponse
-from passlib.context import CryptContext # <-- Импорт CryptContext
+from app.schemas.user import UserCreate, UserUpdate, UserResponse, PaginationParams
+from app.core.cache import cache_service
+from app.core.config import settings
+from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto") # <-- Создаем контекст
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 class UserService:
     def __init__(self, db: Session):
         self.db = db
 
-    def create(self, data: UserCreate) -> UserResponse: # <-- Изменили возвращаемый тип
-        # Хэшируем пароль
+    def create(self, data: UserCreate) -> UserResponse:
         hashed_password = self.hash_password(data.password)
-        # Подготовим данные для создания, заменив password на hashed_password
         user_dict = data.model_dump()
         user_dict['hashed_password'] = hashed_password
-        # Удалим оригинальный password из словаря, так как модели он не нужен
         del user_dict['password']
 
-        user = User(**user_dict) # <-- Передаем подготовленный словарь
+        user = User(**user_dict)
         self.db.add(user)
         self.db.commit()
         self.db.refresh(user)
 
-        # Создаем и возвращаем Pydantic-модель UserResponse
-        return UserResponse.from_orm(user) # <-- Используем from_orm или конструктор Pydantic
+        result = UserResponse.from_orm(user)
+        # Инвалидация списков при создании
+        cache_service.delete_by_pattern("wp:users:list:*")
+        return result
 
-    def hash_password(self, password: str) -> str: # <-- Метод для хэширования
+    def hash_password(self, password: str) -> str:
         return pwd_context.hash(password)
 
-    # ... остальные методы ...
     def get_by_id(self, user_id: UUID) -> Optional[User]:
+        """Внутренний метод без кеширования (для ORM-операций)."""
         stmt = select(User).where(User.id == user_id, User.deleted_at.is_(None))
         user = self.db.execute(stmt).scalar_one_or_none()
-        print(f"DEBUG UserService.get_by_id: Searched for {user_id}, found: {user}") # <-- Добавлен лог
         return user
 
-    def get_all_active(self, pagination: PaginationParams) -> Tuple[list[User], int]:
+    def get_by_id_cached(self, user_id: UUID):
+        """Публичный метод с кешированием (для API ответов)."""
+        cache_key = f"wp:users:detail:{user_id}"
+        cached = cache_service.get(cache_key)
+        if cached:
+            return cached
+
+        user = self.get_by_id(user_id)
+        if user:
+            user_data = UserResponse.model_validate(user).model_dump(mode="json")
+            cache_service.set(cache_key, user_data, ttl=settings.CACHE_TTL_DEFAULT)
+            return user
+        return None
+
+    def get_all_active(self, pagination: PaginationParams) -> Tuple[list, int]:
+        cache_key = f"wp:users:list:page:{pagination.page}:limit:{pagination.limit}"
+        cached = cache_service.get(cache_key)
+        if cached:
+            return cached["users"], cached["total"]
+
         offset = (pagination.page - 1) * pagination.limit
         count_stmt = select(func.count()).select_from(select(User).where(User.deleted_at.is_(None)).subquery())
         total = self.db.execute(count_stmt).scalar()
 
         stmt = select(User).where(User.deleted_at.is_(None)).order_by(User.created_at.desc()).offset(offset).limit(pagination.limit)
         users = self.db.execute(stmt).scalars().all()
-        return users, total # type: ignore
 
-    def update(self, user_id: UUID, data: UserUpdate, partial: bool = False) -> Optional[UserResponse]: # <-- Изменили возвращаемый тип
+        # Кешируем сериализованные данные
+        users_data = [UserResponse.model_validate(u).model_dump(mode="json") for u in users]
+        cache_service.set(cache_key, {"users": users_data, "total": total}, ttl=settings.CACHE_TTL_DEFAULT)
+        return users, total
+
+    def update(self, user_id: UUID, data: UserUpdate, partial: bool = False) -> Optional[UserResponse]:
         user = self.get_by_id(user_id)
         if not user:
-            print(f"DEBUG UserService.update: User with id {user_id} not found.")
             return None
-        print(f"DEBUG UserService.update: Found user {user.id} before update.")
 
         update_data = data.model_dump(exclude_unset=partial)
-        # Исключаем поля со значением None, чтобы не перезаписывать их в БД
         update_data = {k: v for k, v in update_data.items() if v is not None}
-        
+
         if 'password' in update_data and update_data['password'] is not None:
             update_data['hashed_password'] = self.hash_password(update_data.pop('password'))
 
@@ -69,16 +89,14 @@ class UserService:
         user.updated_at = datetime.utcnow()
 
         self.db.commit()
-        print(f"DEBUG UserService.update: Committed changes for user {user.id}.")
         self.db.refresh(user)
-        print(f"DEBUG UserService.update: Refreshed user {user.id}. Hashed password: {getattr(user, 'hashed_password', 'NOT_SET')}")
-        print(f"DEBUG UserService.update: About to return user object: {user}")
 
-        # --- СОЗДАЕМ Pydantic-МОДЕЛЬ ВНУТРИ СЕССИИ ---
         user_response = UserResponse.from_orm(user)
-        print(f"DEBUG UserService.update: Returning UserResponse: {user_response}") # <-- Добавьте лог
+        # Инвалидация кеша при обновлении
+        cache_service.delete_by_pattern("wp:users:list:*")
+        cache_service.delete(f"wp:users:detail:{user_id}")
+        cache_service.delete(f"wp:users:profile:{user_id}")
         return user_response
-        # ---------------------------------------------
 
     def delete(self, user_id: UUID) -> bool:
         user = self.get_by_id(user_id)
@@ -86,4 +104,8 @@ class UserService:
             return False
         user.deleted_at = datetime.utcnow()
         self.db.commit()
+        # Инвалидация кеша при удалении
+        cache_service.delete_by_pattern("wp:users:list:*")
+        cache_service.delete(f"wp:users:detail:{user_id}")
+        cache_service.delete(f"wp:users:profile:{user_id}")
         return True
