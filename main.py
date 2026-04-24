@@ -9,6 +9,7 @@ import os
 from app.routers import user_router
 from app.routers import file_router
 from app.routers.auth_router import router as auth_router
+from app.core.config import settings
 
 # Настройка логирования
 logging.basicConfig(
@@ -20,6 +21,17 @@ logger = logging.getLogger(__name__)
 # Определяем окружение
 IS_PRODUCTION = os.getenv('NODE_ENV') == 'production'
 
+# Конфигурация OAuth для Swagger UI (только в dev)
+swagger_ui_oauth = None
+if not IS_PRODUCTION:
+    swagger_ui_oauth = {
+        "clientId": settings.YANDEX_CLIENT_ID,
+        "clientSecret": settings.YANDEX_CLIENT_SECRET,
+        "scopes": ["login:email", "login:info"],
+        "appName": "Lab Project API",
+        "usePkceWithAuthorizationCodeGrant": True,
+    }
+
 # В production отключаем документацию
 app = FastAPI(
     title="Lab Project API",
@@ -28,6 +40,7 @@ app = FastAPI(
     docs_url=None if IS_PRODUCTION else "/docs",
     redoc_url=None if IS_PRODUCTION else "/redoc",
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
+    swagger_ui_init_oauth=swagger_ui_oauth,
 )
 
 # Кастомная OpenAPI схема с настройками безопасности (только в dev)
