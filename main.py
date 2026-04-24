@@ -38,7 +38,7 @@ app = FastAPI(
     description="Документация API для лабораторных работ №2-№4",
     version="1.0",
     docs_url=None if IS_PRODUCTION else "/docs",
-    redoc_url=None if IS_PRODUCTION else "/redoc",
+    redoc_url=None,
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
     swagger_ui_init_oauth=swagger_ui_oauth,
 )
@@ -89,6 +89,32 @@ if not IS_PRODUCTION:
         return app.openapi_schema
 
     app.openapi = custom_openapi
+
+# Кастомный ReDoc с рабочим CDN (только в dev)
+if not IS_PRODUCTION:
+    from fastapi.responses import HTMLResponse
+
+    @app.get("/redoc", include_in_schema=False)
+    async def redoc_html():
+        return HTMLResponse(
+            """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <title>Lab Project API - ReDoc</title>
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+            <style>body { margin: 0; padding: 0; }</style>
+            </head>
+            <body>
+            <noscript>ReDoc requires Javascript to function. Please enable it to browse the documentation.</noscript>
+            <redoc spec-url="/openapi.json"></redoc>
+            <script src="https://cdn.jsdelivr.net/npm/redoc@2.1.3/bundles/redoc.standalone.js"></script>
+            </body>
+            </html>
+            """
+        )
 
 # CORS
 app.add_middleware(
