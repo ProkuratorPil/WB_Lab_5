@@ -10,6 +10,7 @@ from app.routers import user_router
 from app.routers import file_router
 from app.routers.auth_router import router as auth_router
 from app.core.config import settings
+from app.core.database import init_db, close_db
 
 # Настройка логирования
 logging.basicConfig(
@@ -32,6 +33,20 @@ if not IS_PRODUCTION:
         "usePkceWithAuthorizationCodeGrant": True,
     }
 
+import asyncio
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Управление жизненным циклом приложения."""
+    logger.info("Starting application...")
+    await init_db()
+    yield
+    logger.info("Shutting down application...")
+    await close_db()
+
+
 # В production отключаем документацию
 app = FastAPI(
     title="Lab Project API",
@@ -41,6 +56,7 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
     swagger_ui_init_oauth=swagger_ui_oauth,
+    lifespan=lifespan,
 )
 
 # Кастомная OpenAPI схема с настройками безопасности (только в dev)

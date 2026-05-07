@@ -1,30 +1,27 @@
 """
-Dependencies для аутентификации и авторизации.
+Dependencies for authentication and authorization with MongoDB.
 """
 from fastapi import Depends, HTTPException, status, Cookie, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
 from typing import Optional
 from uuid import UUID
 
-from app.core.database import get_db
 from app.core.jwt import verify_access, verify_refresh
-from app.core.security import verify_token
-from app.core.cache import cache_service
-from app.models.user import User
-from app.models.token import Token, TokenType
-from app.crud.token_crud import get_token_by_hash
 from app.core.security import hash_token
+from app.core.cache import cache_service
+from app.models.user import UserDocument
+from app.models.token import TokenDocument, TokenType
+from app.crud.token_crud import get_token_by_hash
 
 
-# Schemes для извлечения токена
+# Schemes for token extraction
 security = HTTPBearer(auto_error=False)
 
 
 def _check_access_jti_in_redis(user_id: UUID, jti: str) -> bool:
     """
-    Проверяет наличие JTI Access токена в Redis.
-    Если ключа нет — токен отозван или истёк.
+    Check if Access Token JTI exists in Redis.
+    If key is missing - token is revoked or expired.
     """
     key = f"wp:auth:user:{user_id}:access:{jti}"
     value = cache_service.get(key)
@@ -33,21 +30,20 @@ def _check_access_jti_in_redis(user_id: UUID, jti: str) -> bool:
 
 async def get_current_user(
     request: Request,
-    db: Session = Depends(get_db),
     access_token: Optional[str] = Cookie(default=None, alias="access_token"),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
-) -> User:
+) -> UserDocument:
     """
-    Dependency для получения текущего авторизованного пользователя.
-    Проверяет Access Token из Cookie или заголовка Authorization.
-    Проверяет JTI в Redis для возможности мгновенного отзыва.
+    Dependency to get the current authenticated user.
+    Checks Access Token from Cookie or Authorization header.
+    Checks JTI in Redis for instant revocation.
     """
     token = None
 
-    # Пробуем получить из Cookie
+    # Try from Cookie
     if access_token:
         token = access_token
-    # Пробуем получить из заголовка Authorization
+    # Try from Authorization header
     elif credentials:
         token = credentials.credentials
 
@@ -58,7 +54,7 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Валидируем JWT
+    # Validate JWT
     payload = verify_access(token)
     if not payload:
         raise HTTPException(
@@ -70,7 +66,7 @@ async def get_current_user(
     user_id = UUID(payload["sub"])
     jti = payload.get("jti")
 
-    # Проверяем JTI в Redis (мгновенный отзыв)
+    # Check JTI in Redis (instant revocation)
     if jti and not _check_access_jti_in_redis(user_id, jti):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -78,9 +74,9 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Проверяем, что токен не отозван в БД (дополнительный слой)
-    token_hash = hash_token(token)
-    db_token = get_token_by_hash(db, token_hash)
+    # Check that token is not revoked in DB
+    token_hash_val = hash_token(token)
+    db_token = await get_token_by_hash(token_hash_val)
     if db_token and db_token.is_revoked:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -88,12 +84,12 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Получаем пользователя
-    user = db.query(User).filter(
-        User.id == user_id,
-        User.deleted_at.is_(None),
-        User.is_active == True
-    ).first()
+    # Get user from MongoDB
+    user = await UserDocument.find_one(
+        UserDocument.id == user_id,
+        UserDocument.deleted_at == None,
+        UserDocument.is_active == True
+    )
 
     if not user:
         raise HTTPException(
@@ -107,12 +103,11 @@ async def get_current_user(
 
 async def get_current_user_optional(
     request: Request,
-    db: Session = Depends(get_db),
     access_token: Optional[str] = Cookie(default=None, alias="access_token"),
-) -> Optional[User]:
+) -> Optional[UserDocument]:
     """
-    Optional версия - возвращает пользователя или None.
-    Используется для эндпоинтов, доступных всем.
+    Optional version - returns user or None.
+    Used for endpoints accessible to everyone.
     """
     if not access_token:
         return None
@@ -128,11 +123,11 @@ async def get_current_user_optional(
         if jti and not _check_access_jti_in_redis(user_id, jti):
             return None
 
-        user = db.query(User).filter(
-            User.id == user_id,
-            User.deleted_at.is_(None),
-            User.is_active == True
-        ).first()
+        user = await UserDocument.find_one(
+            UserDocument.id == user_id,
+            UserDocument.deleted_at == None,
+            UserDocument.is_active == True
+        )
 
         return user
     except Exception:
@@ -142,9 +137,7 @@ async def get_current_user_optional(
 async def get_refresh_token(
     refresh_token: Optional[str] = Cookie(default=None, alias="refresh_token"),
 ) -> str:
-    """
-    Dependency для получения Refresh Token из Cookie.
-    """
+    """Dependency to get Refresh Token from Cookie."""
     if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -156,11 +149,10 @@ async def get_refresh_token(
 async def validate_refresh_token(
     request: Request,
     refresh_token: str = Depends(get_refresh_token),
-    db: Session = Depends(get_db),
-) -> tuple[User, str]:
+) -> tuple[UserDocument, str]:
     """
-    Валидирует Refresh Token и возвращает пользователя.
-    Проверяет отзыв токена в БД.
+    Validate Refresh Token and return the user.
+    Checks token revocation in DB.
     """
     user_id = verify_refresh(refresh_token)
     if not user_id:
@@ -169,9 +161,9 @@ async def validate_refresh_token(
             detail="Невалидный или истёкший refresh токен",
         )
 
-    # Проверяем токен в БД
-    token_hash = hash_token(refresh_token)
-    db_token = get_token_by_hash(db, token_hash)
+    # Check token in DB
+    token_hash_val = hash_token(refresh_token)
+    db_token = await get_token_by_hash(token_hash_val)
 
     if not db_token:
         raise HTTPException(
@@ -185,12 +177,12 @@ async def validate_refresh_token(
             detail="Токен был отозван",
         )
 
-    # Получаем пользователя
-    user = db.query(User).filter(
-        User.id == user_id,
-        User.deleted_at.is_(None),
-        User.is_active == True
-    ).first()
+    # Get user from MongoDB
+    user = await UserDocument.find_one(
+        UserDocument.id == user_id,
+        UserDocument.deleted_at == None,
+        UserDocument.is_active == True
+    )
 
     if not user:
         raise HTTPException(
@@ -202,7 +194,7 @@ async def validate_refresh_token(
 
 
 def get_client_ip(request: Request) -> str:
-    """Получает IP адрес клиента."""
+    """Get client IP address."""
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -210,5 +202,5 @@ def get_client_ip(request: Request) -> str:
 
 
 def get_user_agent(request: Request) -> str:
-    """Получает User-Agent клиента."""
+    """Get client User-Agent."""
     return request.headers.get("User-Agent", "unknown")

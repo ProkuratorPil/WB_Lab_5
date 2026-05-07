@@ -1,52 +1,86 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+"""
+Async CRUD operations for MongoDB - User document.
+Uses Beanie ODM for database operations.
+"""
 from uuid import UUID
-from app.models.user import User
-from app.schemas.user import UserCreate, UserUpdate
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
+from datetime import datetime, timezone
 
-# Функция для получения списка пользователей с пагинацией
-def get_users(db: Session, skip: int = 0, limit: int = 10) -> Tuple[list[User], int]:
-    query = db.query(User).filter(User.deleted_at.is_(None)) # <- Фильтруем по User
-    total = query.count()
-    users = query.offset(skip).limit(limit).all() # <- Получаем пользователей
+from app.models.user import UserDocument
+from app.schemas.user import UserCreate, UserUpdate
+
+
+async def get_users(skip: int = 0, limit: int = 10) -> Tuple[List[UserDocument], int]:
+    """
+    Get paginated list of non-deleted users.
+    Returns (users, total_count).
+    """
+    query = UserDocument.find(UserDocument.deleted_at == None)
+    total = await query.count()
+    users = await query.sort(-UserDocument.created_at).skip(skip).limit(limit).to_list()
     return users, total
 
-# Функция для получения пользователя по ID
-def get_user_by_id(db: Session, user_id: UUID) -> Optional[User]:
-    return db.query(User).filter( # <- Запрашиваем User
-        User.id == user_id,
-        User.deleted_at.is_(None)
-    ).first()
 
-# Функция для создания нового пользователя
-def create_user(db: Session, user_in: UserCreate) -> User:
-    db_user = User(**user_in.model_dump()) # <- Создаем экземпляр User
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
+async def get_user_by_id(user_id: UUID) -> Optional[UserDocument]:
+    """Get a single user by ID (excluding deleted)."""
+    return await UserDocument.find_one(
+        UserDocument.id == user_id,
+        UserDocument.deleted_at == None
+    )
 
-# Функция для обновления пользователя
-def update_user(db: Session, user_id: UUID, user_update: UserUpdate) -> Optional[User]:
-    db_user = get_user_by_id(db, user_id) # <- Вызываем функцию для User
-    if not db_user:
+
+async def get_user_by_username(username: str) -> Optional[UserDocument]:
+    """Get a user by username (including deleted)."""
+    return await UserDocument.find_one(UserDocument.username == username)
+
+
+async def get_user_by_email(email: str) -> Optional[UserDocument]:
+    """Get a user by email (including deleted)."""
+    return await UserDocument.find_one(UserDocument.email == email)
+
+
+async def get_user_by_yandex_id(yandex_id: str) -> Optional[UserDocument]:
+    """Get a user by Yandex OAuth ID."""
+    return await UserDocument.find_one(UserDocument.yandex_id == yandex_id)
+
+
+async def get_user_by_vk_id(vk_id: str) -> Optional[UserDocument]:
+    """Get a user by VK OAuth ID."""
+    return await UserDocument.find_one(UserDocument.vk_id == vk_id)
+
+
+async def create_user(user_data: dict) -> UserDocument:
+    """Create a new user document."""
+    user = UserDocument(**user_data)
+    await user.insert()
+    return user
+
+
+async def update_user(user_id: UUID, update_data: dict) -> Optional[UserDocument]:
+    """Update a user document partially."""
+    user = await get_user_by_id(user_id)
+    if not user:
         return None
-    update_data = user_update.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(db_user, field, value)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
+    
+    for key, value in update_data.items():
+        if value is not None:
+            setattr(user, key, value)
+    
+    user.updated_at = datetime.now(timezone.utc)
+    await user.save()
+    return user
 
-# Функция для мягкого удаления пользователя
-def soft_delete_user(db: Session, user_id: UUID) -> bool:
-    # Захватываем пользователя по ID, включая возможно удаленных (без фильтра deleted_at)
-    # Это позволяет попытаться "удалить" уже удаленного пользователя (хотя обычно возвращают False или игнорируют).
-    # В данном случае, мы проверим, что он не удален, перед тем как удалять.
-    db_user = db.query(User).filter(User.id == user_id).first() # <- Запрашиваем User
-    if db_user and db_user.deleted_at is None: # <- Проверяем, что запись существует и не удалена
-        db_user.deleted_at = func.now() # <- Устанавливаем время удаления
-        db.commit()
+
+async def soft_delete_user(user_id: UUID) -> bool:
+    """Soft delete a user by setting deleted_at."""
+    user = await UserDocument.find_one(UserDocument.id == user_id)
+    if user and user.deleted_at is None:
+        user.deleted_at = datetime.now(timezone.utc)
+        await user.save()
         return True
     return False
+
+
+async def get_user_by_id_raw(user_id: UUID) -> Optional[UserDocument]:
+    """Get a user by ID without soft-delete filter."""
+    return await UserDocument.find_one(UserDocument.id == user_id)

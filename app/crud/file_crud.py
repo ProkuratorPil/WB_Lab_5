@@ -1,50 +1,67 @@
-# app/crud/file_crud.py
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+"""
+Async CRUD operations for MongoDB - UploadedFile document.
+Uses Beanie ODM for database operations.
+"""
 from uuid import UUID
-from app.models.uploaded_file import UploadedFile
-from app.schemas.file import FileCreate, FileUpdate
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
+from datetime import datetime, timezone
 
-def get_files(db: Session, user_id_filter: Optional[UUID] = None, skip: int = 0, limit: int = 10) -> Tuple[list[UploadedFile], int]:
+from app.models.uploaded_file import UploadedFileDocument
+
+
+async def get_files(
+    user_id_filter: Optional[UUID] = None,
+    skip: int = 0,
+    limit: int = 10
+) -> Tuple[List[UploadedFileDocument], int]:
     """
-    Получает список файлов с возможностью фильтрации по user_id.
+    Get paginated list of non-deleted files.
+    Optionally filter by user_id.
     """
-    query = db.query(UploadedFile).filter(UploadedFile.deleted_at.is_(None))
+    query = UploadedFileDocument.find(UploadedFileDocument.deleted_at == None)
     if user_id_filter:
-        query = query.filter(UploadedFile.user_id == user_id_filter)
-    total = query.count()
-    files = query.offset(skip).limit(limit).all()
+        query = query.find(UploadedFileDocument.user_id == user_id_filter)
+    
+    total = await query.count()
+    files = await query.sort(-UploadedFileDocument.created_at).skip(skip).limit(limit).to_list()
     return files, total
 
-def get_file_by_id(db: Session, file_id: UUID) -> Optional[UploadedFile]:
-    return db.query(UploadedFile).filter(
-        UploadedFile.id == file_id,
-        UploadedFile.deleted_at.is_(None)
-    ).first()
 
-def create_file(db: Session, file_in: FileCreate) -> UploadedFile:
-    db_file = UploadedFile(**file_in.model_dump())
-    db.add(db_file)
-    db.commit()
-    db.refresh(db_file)
-    return db_file
+async def get_file_by_id(file_id: UUID) -> Optional[UploadedFileDocument]:
+    """Get a single file by ID (excluding deleted)."""
+    return await UploadedFileDocument.find_one(
+        UploadedFileDocument.id == file_id,
+        UploadedFileDocument.deleted_at == None
+    )
 
-def update_file(db: Session, file_id: UUID, file_update: FileUpdate) -> Optional[UploadedFile]:
-    db_file = get_file_by_id(db, file_id)
-    if not db_file:
+
+async def create_file(file_data: dict) -> UploadedFileDocument:
+    """Create a new uploaded file document."""
+    file_doc = UploadedFileDocument(**file_data)
+    await file_doc.insert()
+    return file_doc
+
+
+async def update_file(file_id: UUID, update_data: dict) -> Optional[UploadedFileDocument]:
+    """Update a file document partially."""
+    file_doc = await get_file_by_id(file_id)
+    if not file_doc:
         return None
-    update_data = file_update.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(db_file, field, value)
-    db.commit()
-    db.refresh(db_file)
-    return db_file
+    
+    for key, value in update_data.items():
+        if value is not None:
+            setattr(file_doc, key, value)
+    
+    file_doc.updated_at = datetime.now(timezone.utc)
+    await file_doc.save()
+    return file_doc
 
-def soft_delete_file(db: Session, file_id: UUID) -> bool:
-    db_file = db.query(UploadedFile).filter(UploadedFile.id == file_id).first()
-    if db_file and db_file.deleted_at is None:
-        db_file.deleted_at = func.now()
-        db.commit()
+
+async def soft_delete_file(file_id: UUID) -> bool:
+    """Soft delete a file by setting deleted_at."""
+    file_doc = await UploadedFileDocument.find_one(UploadedFileDocument.id == file_id)
+    if file_doc and file_doc.deleted_at is None:
+        file_doc.deleted_at = datetime.now(timezone.utc)
+        await file_doc.save()
         return True
     return False

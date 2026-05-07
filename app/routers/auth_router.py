@@ -1,14 +1,12 @@
 """
-Роутер аутентификации и авторизации.
+Async router for authentication and authorization with MongoDB.
 """
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from sqlalchemy.orm import Session
 from typing import Optional
 import secrets
 
-from app.core.database import get_db
 from app.core.config import settings
 from app.core.jwt import create_tokens, jwt_manager, verify_refresh
 from app.core.security import hash_password, verify_password, hash_token
@@ -31,8 +29,8 @@ from app.schemas.auth import (
     MessageResponse
 )
 from app.schemas.common import get_auth_responses
-from app.models.user import User
-from app.models.token import TokenType
+from app.models.user import UserDocument
+from app.models.token import TokenType, TokenDocument
 from app.crud.token_crud import create_token, revoke_token, revoke_all_user_tokens, get_token_by_hash
 
 
@@ -52,7 +50,7 @@ def clear_auth_cookies(response):
     response.delete_cookie(key="refresh_token")
 
 
-def get_oauth_providers_list(user: User) -> list[str]:
+def get_oauth_providers_list(user: UserDocument) -> list[str]:
     providers = []
     if user.yandex_id:
         providers.append("yandex")
@@ -61,18 +59,17 @@ def get_oauth_providers_list(user: User) -> list[str]:
     return providers
 
 
-def _save_tokens(db: Session, user_id, tokens: dict, ip: str, ua: str):
-    """Сохраняет токены в БД и JTI Access токена в Redis."""
+async def _save_tokens(user_id, tokens: dict, ip: str, ua: str):
+    """Save tokens to MongoDB and JTI Access token to Redis."""
     access_jti = tokens.get("access_jti")
     access_ttl = int(jwt_manager.access_expires_delta.total_seconds())
 
-    # Сохраняем JTI в Redis для возможности мгновенного отзыва
+    # Save JTI to Redis for instant revocation
     if access_jti:
         redis_key = f"wp:auth:user:{user_id}:access:{access_jti}"
         cache_service.set(redis_key, "valid", ttl=access_ttl)
 
-    create_token(
-        db=db,
+    await create_token(
         user_id=user_id,
         token=tokens["access_token"],
         token_type=TokenType.access,
@@ -80,8 +77,7 @@ def _save_tokens(db: Session, user_id, tokens: dict, ip: str, ua: str):
         ip_address=ip,
         expires_at=datetime.now(timezone.utc) + jwt_manager.access_expires_delta
     )
-    create_token(
-        db=db,
+    await create_token(
         user_id=user_id,
         token=tokens["refresh_token"],
         token_type=TokenType.refresh,
@@ -92,7 +88,7 @@ def _save_tokens(db: Session, user_id, tokens: dict, ip: str, ua: str):
 
 
 def _invalidate_user_session_cache(user_id):
-    """Инвалидирует кеш сессии и профиля пользователя."""
+    """Invalidate user session and profile cache."""
     cache_service.delete_by_pattern(f"wp:auth:user:{user_id}:access:*")
     cache_service.delete(f"wp:users:profile:{user_id}")
 
@@ -108,29 +104,27 @@ def _invalidate_user_session_cache(user_id):
         **get_auth_responses(400, 422),
     }
 )
-async def register(user_data: UserRegister, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == user_data.email, User.deleted_at.is_(None)).first()
+async def register(user_data: UserRegister):
+    existing = await UserDocument.find_one(UserDocument.email == user_data.email, UserDocument.deleted_at == None)
     if existing:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пользователь с таким email уже существует")
 
-    existing = db.query(User).filter(User.username == user_data.username.lower(), User.deleted_at.is_(None)).first()
-    if existing:
+    existing = await UserDocument.find_one(UserDocument.username == user_data.username.lower())
+    if existing and existing.deleted_at is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Пользователь с таким username уже существует")
 
-    hashed_password, salt = hash_password(user_data.password)
+    hashed_pwd, salt = hash_password(user_data.password)
 
-    user = User(
+    user = UserDocument(
         username=user_data.username.lower(),
         email=user_data.email.lower(),
-        hashed_password=hashed_password,
+        hashed_password=hashed_pwd,
         password_salt=salt,
         phone=user_data.phone,
         is_verified=False,
     )
 
-    db.add(user)
-    db.commit()
-    db.refresh(user)
+    await user.insert()
 
     return UserResponse(
         id=user.id, username=user.username, email=user.email, phone=user.phone,
@@ -148,8 +142,8 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
         **get_auth_responses(400, 401, 422),
     }
 )
-async def login(response: Response, request: Request, user_data: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == user_data.email.lower(), User.deleted_at.is_(None)).first()
+async def login(response: Response, request: Request, user_data: UserLogin):
+    user = await UserDocument.find_one(UserDocument.email == user_data.email.lower(), UserDocument.deleted_at == None)
 
     if not user or not user.hashed_password or not verify_password(user_data.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Неверный email или пароль")
@@ -160,7 +154,7 @@ async def login(response: Response, request: Request, user_data: UserLogin, db: 
     tokens = create_tokens(user.id)
     ip = get_client_ip(request)
     ua = get_user_agent(request)
-    _save_tokens(db, user.id, tokens, ip, ua)
+    await _save_tokens(user.id, tokens, ip, ua)
 
     set_auth_cookies(response, tokens["access_token"], tokens["refresh_token"], tokens["access_expires_at"], tokens["refresh_expires_at"])
     response_data = {k: v for k, v in tokens.items() if k != "access_jti"}
@@ -177,18 +171,18 @@ async def login(response: Response, request: Request, user_data: UserLogin, db: 
         **get_auth_responses(401),
     }
 )
-async def refresh_tokens(response: Response, request: Request, result: tuple = Depends(validate_refresh_token), db: Session = Depends(get_db)):
+async def refresh_tokens(response: Response, request: Request, result: tuple = Depends(validate_refresh_token)):
     user, old_refresh_token = result
-    old_token_hash = hash_token(old_refresh_token)
+    old_token_hash_val = hash_token(old_refresh_token)
     tokens = create_tokens(user.id)
     ip = get_client_ip(request)
     ua = get_user_agent(request)
-    _save_tokens(db, user.id, tokens, ip, ua)
+    await _save_tokens(user.id, tokens, ip, ua)
 
-    old_token = get_token_by_hash(db, old_token_hash)
+    old_token = await get_token_by_hash(old_token_hash_val)
     if old_token:
         old_token.is_revoked = True
-        db.commit()
+        await old_token.save()
 
     set_auth_cookies(response, tokens["access_token"], tokens["refresh_token"], tokens["access_expires_at"], tokens["refresh_expires_at"])
     response_data = {k: v for k, v in tokens.items() if k != "access_jti"}
@@ -206,7 +200,7 @@ async def refresh_tokens(response: Response, request: Request, result: tuple = D
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-async def whoami(current_user: User = Depends(get_current_user)):
+async def whoami(current_user: UserDocument = Depends(get_current_user)):
     cache_key = f"wp:users:profile:{current_user.id}"
     cached = cache_service.get(cache_key)
     if cached:
@@ -232,8 +226,8 @@ async def whoami(current_user: User = Depends(get_current_user)):
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-async def logout(response: Response, request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Инвалидация JTI Access токена в Redis
+async def logout(response: Response, request: Request, current_user: UserDocument = Depends(get_current_user)):
+    # Invalidate JTI Access token in Redis
     access_token = request.cookies.get("access_token")
     if access_token:
         payload = jwt_manager.decode_token(access_token)
@@ -243,13 +237,13 @@ async def logout(response: Response, request: Request, current_user: User = Depe
 
     refresh_token = request.cookies.get("refresh_token")
     if refresh_token:
-        token_hash = hash_token(refresh_token)
-        token = get_token_by_hash(db, token_hash)
+        token_hash_val = hash_token(refresh_token)
+        token = await get_token_by_hash(token_hash_val)
         if token and token.user_id == current_user.id:
             token.is_revoked = True
-            db.commit()
+            await token.save()
 
-    # Инвалидация кеша профиля
+    # Invalidate profile cache
     cache_service.delete(f"wp:users:profile:{current_user.id}")
     clear_auth_cookies(response)
     return MessageResponse(message="Сессия завершена")
@@ -266,11 +260,11 @@ async def logout(response: Response, request: Request, current_user: User = Depe
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-async def logout_all(response: Response, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    count = revoke_all_user_tokens(db, current_user.id)
-    # Удаляем все JTI пользователя из Redis
+async def logout_all(response: Response, current_user: UserDocument = Depends(get_current_user)):
+    count = await revoke_all_user_tokens(current_user.id)
+    # Remove all user JTI from Redis
     cache_service.delete_by_pattern(f"wp:auth:user:{current_user.id}:access:*")
-    # Инвалидация кеша профиля
+    # Invalidate profile cache
     cache_service.delete(f"wp:users:profile:{current_user.id}")
     clear_auth_cookies(response)
     return MessageResponse(message="Все сессии завершены", detail=f"Отозвано токенов: {count}")
@@ -310,7 +304,6 @@ async def oauth_callback(
     state: Optional[str] = None,
     response: Response = None,
     request: Request = None,
-    db: Session = Depends(get_db)
 ):
     provider_name = provider.lower()
     if not code or not state:
@@ -323,25 +316,33 @@ async def oauth_callback(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Не удалось получить данные от провайдера")
     provider_user_id = user_info.get("provider_user_id")
     provider_id_field = f"{provider_name}_id"
-    user = db.query(User).filter(getattr(User, provider_id_field) == provider_user_id, User.deleted_at.is_(None)).first()
+    
+    user = await UserDocument.find_one({provider_id_field: provider_user_id, "deleted_at": None})
     if not user:
         email = user_info.get("email")
         if email:
-            user = db.query(User).filter(User.email == email.lower(), User.deleted_at.is_(None)).first()
+            user = await UserDocument.find_one(UserDocument.email == email.lower(), UserDocument.deleted_at == None)
         if user:
             setattr(user, provider_id_field, provider_user_id)
             if not user.is_verified:
                 user.is_verified = True
         else:
             username = user_info.get("username") or f"{provider_name}_{provider_user_id}"
-            user = User(username=username.lower(), email=(email or f"{provider_user_id}@{provider_name}.oauth").lower(), is_verified=True, **{provider_id_field: provider_user_id})
-            db.add(user)
-    db.commit()
-    db.refresh(user)
+            user_data = {
+                "username": username.lower(),
+                "email": (email or f"{provider_user_id}@{provider_name}.oauth").lower(),
+                "is_verified": True,
+                provider_id_field: provider_user_id
+            }
+            user = UserDocument(**user_data)
+            await user.insert()
+    else:
+        await user.save()
+    
     tokens = create_tokens(user.id)
     ip = get_client_ip(request)
     ua = get_user_agent(request)
-    _save_tokens(db, user.id, tokens, ip, ua)
+    await _save_tokens(user.id, tokens, ip, ua)
     set_auth_cookies(response, tokens["access_token"], tokens["refresh_token"], tokens["access_expires_at"], tokens["refresh_expires_at"])
     return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
 
@@ -356,7 +357,7 @@ async def oauth_callback(
         **get_auth_responses(422),
     }
 )
-async def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
+async def forgot_password(data: ForgotPasswordRequest):
     return MessageResponse(message="Если аккаунт существует, на email отправлена инструкция по сбросу пароля")
 
 
@@ -370,5 +371,5 @@ async def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get
         **get_auth_responses(400, 422),
     }
 )
-async def reset_password(data: ResetPasswordRequest, db: Session = Depends(get_db)):
+async def reset_password(data: ResetPasswordRequest):
     return MessageResponse(message="Пароль успешно изменён")

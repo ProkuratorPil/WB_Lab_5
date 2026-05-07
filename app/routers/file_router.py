@@ -1,12 +1,12 @@
-# app/api/routers/file_router.py
+"""
+Async router for file management with MongoDB.
+"""
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from sqlalchemy.orm import Session
 from uuid import UUID
 from typing import Optional
 
-from app.core.database import get_db
 from app.core.dependencies import get_current_user
-from app.models.user import User
+from app.models.user import UserDocument
 from app.services.file_service import FileService
 from app.schemas.file import FileCreate, FileUpdate, FileResponse, PaginationParams, PaginatedResponse
 from app.schemas.common import get_auth_responses
@@ -26,10 +26,9 @@ router = APIRouter(prefix="/files", tags=["Files"])
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def create_file(
+async def create_file(
     file_data: FileCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Создание записи о файле.
@@ -41,8 +40,8 @@ def create_file(
             detail="Нельзя создавать файлы для других пользователей"
         )
 
-    service = FileService(db)
-    file_entry = service.create(file_data)
+    service = FileService()
+    file_entry = await service.create(file_data)
     return file_entry
 
 
@@ -57,11 +56,10 @@ def create_file(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def get_files(
+async def get_files(
     pagination: PaginationParams = Depends(),
     user_id_filter: Optional[UUID] = None,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Получение списка файлов (пагинированный).
@@ -71,8 +69,8 @@ def get_files(
     """
     user_filter = current_user.id
 
-    service = FileService(db)
-    files, total, total_pages = service.get_all_active(
+    service = FileService()
+    files, total, total_pages = await service.get_all_active(
         pagination,
         user_id_filter=user_filter
     )
@@ -98,17 +96,16 @@ def get_files(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def get_file(
+async def get_file(
     file_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Получение файла по ID.
     Доступ: Private (только владелец)
     """
-    service = FileService(db)
-    file_entry = service.get_by_id(file_id)
+    service = FileService()
+    file_entry = await service.get_by_id(file_id)
 
     if not file_entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -133,18 +130,17 @@ def get_file(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def update_file_full(
+async def update_file_full(
     file_id: UUID,
     file_data: FileUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Полное обновление записи о файле.
     Доступ: Private (только владелец)
     """
-    service = FileService(db)
-    existing = service.get_by_id(file_id)
+    service = FileService()
+    existing = await service.get_by_id(file_id)
 
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -155,7 +151,7 @@ def update_file_full(
             detail="Нет прав на редактирование этого файла"
         )
 
-    file_entry = service.update(file_id, file_data)
+    file_entry = await service.update(file_id, file_data)
     return file_entry
 
 
@@ -170,18 +166,17 @@ def update_file_full(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def update_file_partial(
+async def update_file_partial(
     file_id: UUID,
     file_data: FileUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Частичное обновление записи о файле.
     Доступ: Private (только владелец)
     """
-    service = FileService(db)
-    existing = service.get_by_id(file_id)
+    service = FileService()
+    existing = await service.get_by_id(file_id)
 
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -192,7 +187,7 @@ def update_file_partial(
             detail="Нет прав на редактирование этого файла"
         )
 
-    file_entry = service.update(file_id, file_data)
+    file_entry = await service.update(file_id, file_data)
     return file_entry
 
 
@@ -206,17 +201,16 @@ def update_file_partial(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def delete_file(
+async def delete_file(
     file_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Удаление файла (Soft Delete).
     Доступ: Private (только владелец)
     """
-    service = FileService(db)
-    existing = service.get_by_id(file_id)
+    service = FileService()
+    existing = await service.get_by_id(file_id)
 
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
@@ -227,7 +221,7 @@ def delete_file(
             detail="Нет прав на удаление этого файла"
         )
 
-    deleted = service.delete(file_id)
+    deleted = await service.delete(file_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
 

@@ -1,5 +1,14 @@
-from app.models.user import User
-from app.models.token import Token, TokenType
-from app.models.uploaded_file import UploadedFile
+"""
+MongoDB document models.
+All models use Beanie ODM for schema validation and indexing.
+"""
+from app.models.user import UserDocument
+from app.models.token import TokenDocument, TokenType
+from app.models.uploaded_file import UploadedFileDocument
 
-__all__ = ["User", "Token", "TokenType", "UploadedFile"]
+__all__ = [
+    "UserDocument",
+    "TokenDocument",
+    "TokenType",
+    "UploadedFileDocument",
+]

@@ -1,10 +1,11 @@
+"""
+Async router for user management with MongoDB.
+"""
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from sqlalchemy.orm import Session
 from uuid import UUID
 
-from app.core.database import get_db
 from app.core.dependencies import get_current_user
-from app.models.user import User
+from app.models.user import UserDocument
 from app.services.user_service import UserService
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, PaginationParams, PaginatedResponse
 from app.schemas.common import get_auth_responses
@@ -26,13 +27,13 @@ router = APIRouter(
         **get_auth_responses(400, 422),
     }
 )
-def create_user(user_data: UserCreate, db: Session = Depends(get_db)):
+async def create_user(user_data: UserCreate):
     """
     Создание нового пользователя.
     Доступ: Public
     """
-    service = UserService(db)
-    user = service.create(user_data)
+    service = UserService()
+    user = await service.create(user_data)
     return user
 
 
@@ -47,17 +48,16 @@ def create_user(user_data: UserCreate, db: Session = Depends(get_db)):
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def get_users(
+async def get_users(
     pagination: PaginationParams = Depends(),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Получение списка пользователей (пагинированный).
     Доступ: Private (только авторизованные)
     """
-    service = UserService(db)
-    users, total = service.get_all_active(pagination)
+    service = UserService()
+    users, total = await service.get_all_active(pagination)
     total_pages = (total + pagination.limit - 1) // pagination.limit
     return {
         "data": users,
@@ -81,17 +81,16 @@ def get_users(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def get_user(
+async def get_user(
     user_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Получение пользователя по ID.
     Доступ: Private (только авторизованные)
     """
-    service = UserService(db)
-    user = service.get_by_id_cached(user_id)
+    service = UserService()
+    user = await service.get_by_id_cached(user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return user
@@ -108,11 +107,10 @@ def get_user(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def update_user_full(
+async def update_user_full(
     user_id: UUID,
     user_data: UserUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Полное обновление пользователя (PUT).
@@ -124,8 +122,8 @@ def update_user_full(
             detail="Нет прав на редактирование этого пользователя"
         )
 
-    service = UserService(db)
-    user = service.update(user_id, user_data, partial=False)
+    service = UserService()
+    user = await service.update(user_id, user_data, partial=False)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return user
@@ -142,11 +140,10 @@ def update_user_full(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def update_user_partial(
+async def update_user_partial(
     user_id: UUID,
     user_data: UserUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Частичное обновление пользователя (PATCH).
@@ -158,8 +155,8 @@ def update_user_partial(
             detail="Нет прав на редактирование этого пользователя"
         )
 
-    service = UserService(db)
-    user = service.update(user_id, user_data, partial=True)
+    service = UserService()
+    user = await service.update(user_id, user_data, partial=True)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return user
@@ -175,10 +172,9 @@ def update_user_partial(
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-def delete_user(
+async def delete_user(
     user_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: UserDocument = Depends(get_current_user)
 ):
     """
     Удаление пользователя (Soft Delete).
@@ -190,8 +186,8 @@ def delete_user(
             detail="Нет прав на удаление этого пользователя"
         )
 
-    service = UserService(db)
-    deleted = service.delete(user_id)
+    service = UserService()
+    deleted = await service.delete(user_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return None

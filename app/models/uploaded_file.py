@@ -1,24 +1,41 @@
-# app/models/uploaded_file.py
-from sqlalchemy import Column, String, Integer, ForeignKey, DateTime, func
-from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-import uuid
-from app.core.database import Base
+"""
+MongoDB document model for UploadedFile.
+Uses Beanie ODM for schema validation and indexing.
+"""
+from datetime import datetime, timezone
+from typing import Optional
+from beanie import Document, before_event, Insert, Replace
+from pydantic import Field
+from uuid import UUID, uuid4
 
 
-class UploadedFile(Base):
-    __tablename__ = "uploaded_files"
+class UploadedFileDocument(Document):
+    """MongoDB document for uploaded files with soft delete support."""
+    
+    id: UUID = Field(default_factory=uuid4, alias="_id")
+    filename: str = Field(...)
+    stored_filename: str = Field(...)
+    file_path: str = Field(...)
+    file_size: int = Field(...)
+    mime_type: str = Field(...)
+    user_id: UUID = Field(...)
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    deleted_at: Optional[datetime] = None
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, nullable=False)
-    filename = Column(String, nullable=False)         # Оригинальное имя файла
-    stored_filename = Column(String, nullable=False)  # Имя файла на сервере
-    file_path = Column(String, nullable=False)        # Путь к файлу на диске
-    file_size = Column(Integer, nullable=False)       # Размер файла в байтах
-    mime_type = Column(String, nullable=False)        # MIME-тип файла
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False) # Связь с пользователем
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-    deleted_at = Column(DateTime(timezone=True), nullable=True)  # Поле для Soft Delete
+    class Settings:
+        name = "uploaded_files"
+        indexes = [
+            [("user_id", 1)],
+            [("user_id", 1), ("deleted_at", 1)],
+        ]
 
-    # Связь ORM: позволяет получить пользователя, загрузившего файл через uploaded_file.user
-    user = relationship("User", back_populates="files")
+    @before_event(Insert, Replace)
+    def set_timestamps(self):
+        """Auto-update timestamps before insert/replace."""
+        now = datetime.now(timezone.utc)
+        if self.created_at is None:
+            self.created_at = now
+        self.updated_at = now

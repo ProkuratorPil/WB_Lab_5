@@ -1,31 +1,30 @@
 """
-CRUD операции для работы с токенами.
+Async CRUD operations for MongoDB - Token document.
+Uses Beanie ODM for database operations.
 """
-from sqlalchemy.orm import Session
-from sqlalchemy import and_
-from datetime import datetime, timezone
 from uuid import UUID
 from typing import Optional
-from app.models.token import Token, TokenType
-from app.core.security import hash_token
+from datetime import datetime, timezone
+
+from app.models.token import TokenDocument, TokenType
 
 
-def create_token(
-    db: Session,
+async def create_token(
     user_id: UUID,
     token: str,
     token_type: TokenType,
     user_agent: str = None,
     ip_address: str = None,
     expires_at: datetime = None
-) -> Token:
+) -> TokenDocument:
     """
-    Создаёт новую запись токена в БД.
-    Токен хешируется перед сохранением.
+    Create a new token document.
+    Token is hashed before saving.
     """
+    from app.core.security import hash_token
     token_hash = hash_token(token)
     
-    db_token = Token(
+    db_token = TokenDocument(
         user_id=user_id,
         token_type=token_type,
         token_hash=token_hash,
@@ -34,55 +33,47 @@ def create_token(
         expires_at=expires_at
     )
     
-    db.add(db_token)
-    db.commit()
-    db.refresh(db_token)
-    
+    await db_token.insert()
     return db_token
 
 
-def get_token_by_hash(db: Session, token_hash: str) -> Optional[Token]:
-    """Получает токен по его хешу."""
-    return db.query(Token).filter(Token.token_hash == token_hash).first()
+async def get_token_by_hash(token_hash: str) -> Optional[TokenDocument]:
+    """Get a token by its hash."""
+    return await TokenDocument.find_one(TokenDocument.token_hash == token_hash)
 
 
-def get_user_tokens(db: Session, user_id: UUID) -> list[Token]:
-    """Получает все активные токены пользователя."""
-    return db.query(Token).filter(
-        and_(
-            Token.user_id == user_id,
-            Token.is_revoked == False,
-            Token.expires_at > datetime.now(timezone.utc)
-        )
-    ).all()
+async def get_user_tokens(user_id: UUID) -> list[TokenDocument]:
+    """Get all active (non-revoked, non-expired) tokens for a user."""
+    tokens = await TokenDocument.find(
+        TokenDocument.user_id == user_id,
+        TokenDocument.is_revoked == False,
+        TokenDocument.expires_at > datetime.now(timezone.utc)
+    ).to_list()
+    return tokens
 
 
-def revoke_token(db: Session, token_id: UUID) -> bool:
-    """Отзывает токен по ID."""
-    token = db.query(Token).filter(Token.id == token_id).first()
+async def revoke_token(token_id: UUID) -> bool:
+    """Revoke a token by ID."""
+    token = await TokenDocument.find_one(TokenDocument.id == token_id)
     if token:
         token.is_revoked = True
-        db.commit()
+        await token.save()
         return True
     return False
 
 
-def revoke_all_user_tokens(db: Session, user_id: UUID) -> int:
-    """Отзывает все токены пользователя."""
-    result = db.query(Token).filter(
-        and_(
-            Token.user_id == user_id,
-            Token.is_revoked == False
-        )
-    ).update({"is_revoked": True})
-    db.commit()
-    return result
+async def revoke_all_user_tokens(user_id: UUID) -> int:
+    """Revoke all tokens for a user. Returns count of revoked tokens."""
+    result = await TokenDocument.find(
+        TokenDocument.user_id == user_id,
+        TokenDocument.is_revoked == False
+    ).update({"$set": {"is_revoked": True}})
+    return result.modified_count
 
 
-def cleanup_expired_tokens(db: Session) -> int:
-    """Удаляет просроченные токены из БД."""
-    result = db.query(Token).filter(
-        Token.expires_at < datetime.now(timezone.utc)
+async def cleanup_expired_tokens() -> int:
+    """Delete expired tokens from the database."""
+    result = await TokenDocument.find(
+        TokenDocument.expires_at < datetime.now(timezone.utc)
     ).delete()
-    db.commit()
-    return result
+    return result.deleted_count

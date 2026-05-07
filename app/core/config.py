@@ -6,12 +6,9 @@ class Settings(BaseSettings):
     # Environment
     NODE_ENV: str = "development"
 
-    # Database
-    DB_HOST: str = "localhost"
-    DB_PORT: int = 5432
-    DB_USER: str = "postgres"
-    DB_PASSWORD: str = "postgres"
-    DB_NAME: str = "lab_db"
+    # MongoDB
+    MONGO_URI: str = "mongodb://student:student_secure_password@localhost:27017/wp_labs?authSource=admin"
+    DB_NAME: str = "wp_labs"
     PORT: int = 8000
 
     # JWT Secrets

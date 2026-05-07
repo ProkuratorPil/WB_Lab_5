@@ -1,42 +1,52 @@
-# app/services/file_service.py
-from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+"""
+Async service for file management with MongoDB.
+Uses Beanie ODM for database operations.
+"""
 from uuid import UUID
-from datetime import datetime
-from typing import Optional, Tuple
-from app.models.uploaded_file import UploadedFile
+from typing import Optional, Tuple, List
+from datetime import datetime, timezone
+
+from app.models.uploaded_file import UploadedFileDocument
 from app.schemas.file import FileCreate, FileUpdate, PaginationParams
+from app.crud import file_crud
+
 
 class FileService:
-    def __init__(self, db: Session):
-        self.db = db
+    """Service for file operations."""
 
-    def create(self,  FileCreate) -> UploadedFile: # <- Параметр 'data' теперь корректно объявлен
-        # Импорт внутри метода, чтобы избежать циклических зависимостей на этапе загрузки модуля
-        from app.crud.file_crud import create_file
-        return create_file(self.db, data) # <- Используем 'data', который передан в метод
+    def __init__(self):
+        pass  # No db session needed - Beanie handles connection
 
-    def get_by_id(self, file_id: UUID) -> Optional[UploadedFile]:
-        # Импорт внутри метода
-        from app.crud.file_crud import get_file_by_id
-        return get_file_by_id(self.db, file_id)
+    async def create(self, data: FileCreate) -> UploadedFileDocument:
+        """Create a new file record."""
+        return await file_crud.create_file(data.model_dump())
 
-    def get_all_active(self, pagination: PaginationParams, user_id_filter: Optional[UUID] = None) -> Tuple[list[UploadedFile], int, int]:
-        # Импорт внутри метода
-        from app.crud.file_crud import get_files
+    async def get_by_id(self, file_id: UUID) -> Optional[UploadedFileDocument]:
+        """Get file by ID."""
+        return await file_crud.get_file_by_id(file_id)
+
+    async def get_all_active(
+        self, 
+        pagination: PaginationParams, 
+        user_id_filter: Optional[UUID] = None
+    ) -> Tuple[List[UploadedFileDocument], int, int]:
+        """
+        Get paginated list of active files.
+        Returns (files, total, total_pages).
+        """
         offset = (pagination.page - 1) * pagination.limit
-        # get_files возвращает Tuple[list[UploadedFile], int] (files, total)
-        files, total = get_files(self.db, user_id_filter=user_id_filter, skip=offset, limit=pagination.limit)
+        files, total = await file_crud.get_files(
+            user_id_filter=user_id_filter, 
+            skip=offset, 
+            limit=pagination.limit
+        )
         total_pages = (total + pagination.limit - 1) // pagination.limit
-        # Теперь возвращаем три значения: список файлов, общее количество, количество страниц
         return files, total, total_pages
 
-    def update(self, file_id: UUID,  FileUpdate) -> Optional[UploadedFile]: # <- Параметр 'data' теперь корректно объявлен
-        # Импорт внутри метода
-        from app.crud.file_crud import update_file
-        return update_file(self.db, file_id, data) # <- Используем 'data', который передан в метод
+    async def update(self, file_id: UUID, data: FileUpdate) -> Optional[UploadedFileDocument]:
+        """Update a file record."""
+        return await file_crud.update_file(file_id, data.model_dump(exclude_unset=True))
 
-    def delete(self, file_id: UUID) -> bool:
-        # Импорт внутри метода
-        from app.crud.file_crud import soft_delete_file
-        return soft_delete_file(self.db, file_id)
+    async def delete(self, file_id: UUID) -> bool:
+        """Soft delete a file."""
+        return await file_crud.soft_delete_file(file_id)
