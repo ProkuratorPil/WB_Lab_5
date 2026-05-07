@@ -1,40 +1,57 @@
-from sqlalchemy import Column, String, Boolean, DateTime, func
-from sqlalchemy.dialects.postgresql import UUID
-import uuid
-from app.core.database import Base
-from sqlalchemy.orm import relationship
+"""
+MongoDB document model for User.
+Uses Beanie ODM for schema validation and indexing.
+"""
+from datetime import datetime, timezone
+from typing import Optional
+from beanie import Document, before_event, Insert, Replace
+from pydantic import Field
+from uuid import UUID, uuid4
 
 
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, nullable=False)
-    username = Column(String, unique=True, nullable=False)
-    email = Column(String, unique=True, nullable=False)
-    hashed_password = Column(String, nullable=True)  # Nullable для OAuth пользователей
-    password_salt = Column(String, nullable=True)  # Уникальная соль для пароля
-    first_name = Column(String, nullable=True)
-    last_name = Column(String, nullable=True)
-    phone = Column(String, nullable=True)
+class UserDocument(Document):
+    """MongoDB document for users with soft delete support."""
     
-    # OAuth провайдеры
-    yandex_id = Column(String, unique=True, nullable=True)
-    vk_id = Column(String, unique=True, nullable=True)
+    id: UUID = Field(default_factory=uuid4, alias="_id")
+    username: str = Field(..., min_length=1, max_length=50)
+    email: str = Field(..., max_length=100)
+    hashed_password: Optional[str] = None
+    password_salt: Optional[str] = None
+    first_name: Optional[str] = Field(None, max_length=50)
+    last_name: Optional[str] = Field(None, max_length=50)
+    phone: Optional[str] = Field(None, max_length=20)
     
-    # Статус аккаунта
-    is_active = Column(Boolean, default=True, nullable=False)
-    is_verified = Column(Boolean, default=False, nullable=False)
+    # OAuth providers
+    yandex_id: Optional[str] = None
+    vk_id: Optional[str] = None
+    
+    # Account status
+    is_active: bool = True
+    is_verified: bool = False
     
     # Timestamps
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-    deleted_at = Column(DateTime(timezone=True), nullable=True)
-    
-    # Связи
-    files = relationship("UploadedFile", order_by="UploadedFile.created_at", back_populates="user")
-    tokens = relationship("Token", back_populates="user", cascade="all, delete-orphan")
-    
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    deleted_at: Optional[datetime] = None
+
+    class Settings:
+        name = "users"
+        indexes = [
+            [("username", 1)],
+            [("email", 1)],
+            [("yandex_id", 1)],
+            [("vk_id", 1)],
+        ]
+
     @property
     def is_oauth_user(self) -> bool:
-        """Проверяет, зарегистрирован ли пользователь через OAuth"""
+        """Check if user registered via OAuth."""
         return self.hashed_password is None and (self.yandex_id is not None or self.vk_id is not None)
+
+    @before_event(Insert, Replace)
+    def set_timestamps(self):
+        """Auto-update timestamps before insert/replace."""
+        now = datetime.now(timezone.utc)
+        if self.created_at is None:
+            self.created_at = now
+        self.updated_at = now

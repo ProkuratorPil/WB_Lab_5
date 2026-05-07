@@ -91,7 +91,6 @@ class YandexProvider(OAuthProvider):
             response.raise_for_status()
             data = response.json()
             
-            # Приводим к единому формату
             return {
                 "provider": self.provider_name,
                 "provider_user_id": str(data.get("id", "")),
@@ -156,7 +155,6 @@ class VKProvider(OAuthProvider):
             response.raise_for_status()
             data = response.json()
             
-            # VK возвращает массив users
             user_data = data.get("response", [{}])[0] if data.get("response") else {}
             
             return {
@@ -194,13 +192,6 @@ class OAuthProviderFactory:
 async def get_oauth_user_info(provider_name: str, code: str) -> Optional[dict]:
     """
     Универсальная функция для получения данных пользователя через OAuth.
-    
-    Args:
-        provider_name: Название провайдера (yandex, vk)
-        code: Authorization code от провайдера
-    
-    Returns:
-        Словарь с данными пользователя или None при ошибке
     """
     provider = OAuthProviderFactory.get_provider(provider_name)
     if not provider:
@@ -215,12 +206,10 @@ async def get_oauth_user_info(provider_name: str, code: str) -> Optional[dict]:
         
         user_info = await provider.get_user_info(access_token)
         
-        # Добавляем email из token_data если есть
         if "email" not in user_info and "email" in token_data:
             user_info["email"] = token_data["email"]
         
         return user_info
     except Exception as e:
-        # Логируем ошибку, но не возвращаем технические детали клиенту
         print(f"OAuth error for {provider_name}: {str(e)}")
         return None

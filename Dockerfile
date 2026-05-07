@@ -7,5 +7,5 @@ RUN pip install --default-timeout=100 --retries 5 --no-cache-dir -r requirements
 
 COPY . .
 
-# Пропускаем alembic - используем init.sql для создания таблиц
+# Используем MongoDB - инициализация происходит через Beanie ODM при старте
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "4200"]

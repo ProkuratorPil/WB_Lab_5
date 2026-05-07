@@ -1,21 +1,20 @@
 services:
-  postgres:
-    image: postgres:16
-    container_name: wp_labs_db
+  mongo:
+    image: mongo:7
+    container_name: wp_labs_mongo
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${DB_USER:-student}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-student_secure_password}
-      POSTGRES_DB: ${DB_NAME:-wp_labs}
+      MONGO_INITDB_ROOT_USERNAME: ${DB_USER:-student}
+      MONGO_INITDB_ROOT_PASSWORD: ${DB_PASSWORD:-student_secure_password}
+      MONGO_INITDB_DATABASE: ${DB_NAME:-wp_labs}
     ports:
-      - "5432:5432"
+      - "27017:27017"
     volumes:
-      - wp_labs_postgres:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - wp_labs_mongo:/data/db
     networks:
       - wp_labs_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-student} -d ${DB_NAME:-wp_labs}"]
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -42,11 +41,7 @@ services:
     container_name: wp_labs_app
     restart: unless-stopped
     environment:
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: ${DB_USER:-student}
-      DB_PASSWORD: ${DB_PASSWORD:-student_secure_password}
-      DB_NAME: ${DB_NAME:-wp_labs}
+      MONGO_URI: ${MONGO_URI}
       PORT: 4200
       NODE_ENV: ${NODE_ENV:-development}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-super_secret_access_key_change_in_prod}
@@ -66,7 +61,7 @@ services:
     ports:
       - "4200:4200"
     depends_on:
-      postgres:
+      mongo:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -87,7 +82,7 @@ services:
       - redis
 
 volumes:
-  wp_labs_postgres:
+  wp_labs_mongo:
   wp_labs_redis:
   wp_labs_redisinsight:
 
