@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     VK_CLIENT_SECRET: str = "your_vk_client_secret_here"
     VK_CALLBACK_URL: str = "http://localhost:8000/auth/oauth/vk/callback"
 
+    # MinIO
+    MINIO_ENDPOINT: str = "minio:9000"
+    MINIO_ACCESS_KEY: str = "minio_admin"
+    MINIO_SECRET_KEY: str = "minio_secure_password"
+    MINIO_BUCKET: str = "wp-labs-files"
+    MINIO_USE_SSL: bool = False
+    MAX_FILE_SIZE: int = 10485760  # 10 MB
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

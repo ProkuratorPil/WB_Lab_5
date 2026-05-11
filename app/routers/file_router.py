@@ -1,14 +1,16 @@
 """
-Async router for file management with MongoDB.
+Async router for file management with MinIO and MongoDB.
+Supports multipart file upload, download, and delete operations.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
+from fastapi.responses import StreamingResponse
 from uuid import UUID
 from typing import Optional
 
 from app.core.dependencies import get_current_user
 from app.models.user import UserDocument
 from app.services.file_service import FileService
-from app.schemas.file import FileCreate, FileUpdate, FileResponse, PaginationParams, PaginatedResponse
+from app.schemas.file import FileResponse, PaginatedFileResponse
 from app.schemas.common import get_auth_responses
 
 router = APIRouter(prefix="/files", tags=["Files"])
@@ -18,68 +20,88 @@ router = APIRouter(prefix="/files", tags=["Files"])
     "/",
     response_model=FileResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Создание записи о файле",
-    description="Создаёт новую запись о файле для текущего авторизованного пользователя.",
-    response_description="Данные созданной записи о файле",
+    summary="Загрузка файла",
+    description="Загружает файл в MinIO через multipart/form-data. Файл передаётся потоково. "
+                "Максимальный размер: 10 MB. Доступно только для авторизованных пользователей.",
+    response_description="Метаданные загруженного файла",
     responses={
-        **get_auth_responses(400, 401, 403, 422),
+        **get_auth_responses(401, 403, 422, 413),
+        413: {"description": "Файл слишком большой (макс. 10 MB)"},
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-async def create_file(
-    file_data: FileCreate,
+async def upload_file(
+    file: UploadFile = File(..., description="Файл для загрузки"),
     current_user: UserDocument = Depends(get_current_user)
 ):
     """
-    Создание записи о файле.
+    Загрузка файла в MinIO.
     Доступ: Private (только авторизованные)
+    
+    Файл передаётся потоково (streaming) без полной буферизации в памяти.
     """
-    if str(file_data.user_id) != str(current_user.id):
+    if not file or not file.filename:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нельзя создавать файлы для других пользователей"
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Файл не предоставлен"
         )
 
+    # Read file content for size validation
+    file_content = await file.read()
+    file_size = len(file_content)
+    
+    # Re-create a BytesIO stream from the content for MinIO streaming
+    import io
+    file_stream = io.BytesIO(file_content)
+    
     service = FileService()
-    file_entry = await service.create(file_data)
-    return file_entry
+    
+    try:
+        file_doc = await service.upload_file(
+            file_stream=file_stream,
+            file_size=file_size,
+            original_name=file.filename,
+            mime_type=file.content_type or "application/octet-stream",
+            user_id=current_user.id,
+        )
+        return file_doc
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e)
+        )
 
 
 @router.get(
     "/",
-    response_model=PaginatedResponse,
-    summary="Получение списка файлов",
-    description="Возвращает пагинированный список файлов текущего авторизованного пользователя.",
-    response_description="Пагинированный список файлов",
+    response_model=PaginatedFileResponse,
+    summary="Список файлов пользователя",
+    description="Возвращает пагинированный список файлов текущего пользователя.",
+    response_description="Пагинированный список метаданных файлов",
     responses={
-        **get_auth_responses(401, 403, 404, 422),
+        **get_auth_responses(401, 422),
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-async def get_files(
-    pagination: PaginationParams = Depends(),
-    user_id_filter: Optional[UUID] = None,
+async def list_user_files(
+    page: int = Query(1, ge=1, description="Номер страницы"),
+    limit: int = Query(10, ge=1, le=100, description="Элементов на странице"),
     current_user: UserDocument = Depends(get_current_user)
 ):
     """
-    Получение списка файлов (пагинированный).
-    Доступ: Private
-
-    Пользователь видит только свои файлы.
+    Получение списка файлов текущего пользователя (пагинированный).
+    Доступ: Private (только авторизованные)
     """
-    user_filter = current_user.id
-
     service = FileService()
-    files, total, total_pages = await service.get_all_active(
-        pagination,
-        user_id_filter=user_filter
-    )
+    files, total = await service.get_user_files(current_user.id, page=page, limit=limit)
+    total_pages = (total + limit - 1) // limit if total > 0 else 1
+    
     return {
         "data": files,
         "meta": {
             "total": total,
-            "page": pagination.page,
-            "limit": pagination.limit,
+            "page": page,
+            "limit": limit,
             "totalPages": total_pages,
         }
     }
@@ -87,115 +109,56 @@ async def get_files(
 
 @router.get(
     "/{file_id}",
-    response_model=FileResponse,
-    summary="Получение файла по ID",
-    description="Возвращает данные файла по указанному ID. Доступ только для владельца файла.",
-    response_description="Данные файла",
+    summary="Скачивание файла",
+    description="Скачивает файл по ID. Доступно только владельцу файла. "
+                "Файл передаётся потоково через StreamingResponse.",
+    response_description="Файл с правильными заголовками Content-Type, Content-Disposition, Content-Length",
     responses={
         **get_auth_responses(401, 403, 404),
     },
     openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
 )
-async def get_file(
+async def download_file(
     file_id: UUID,
     current_user: UserDocument = Depends(get_current_user)
 ):
     """
-    Получение файла по ID.
+    Скачивание файла по ID.
     Доступ: Private (только владелец)
+    
+    Файл передаётся потоково (streaming) из MinIO.
     """
     service = FileService()
-    file_entry = await service.get_by_id(file_id)
+    stream, file_doc = await service.download_file_stream(file_id, current_user.id)
 
-    if not file_entry:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-
-    if file_entry.user_id != current_user.id:
+    if not file_doc:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет прав на просмотр этого файла"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл не найден"
         )
 
-    return file_entry
-
-
-@router.put(
-    "/{file_id}",
-    response_model=FileResponse,
-    summary="Полное обновление записи о файле",
-    description="Обновляет все поля записи о файле (PUT). Доступ только для владельца файла.",
-    response_description="Данные обновленной записи о файле",
-    responses={
-        **get_auth_responses(401, 403, 404, 422),
-    },
-    openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
-)
-async def update_file_full(
-    file_id: UUID,
-    file_data: FileUpdate,
-    current_user: UserDocument = Depends(get_current_user)
-):
-    """
-    Полное обновление записи о файле.
-    Доступ: Private (только владелец)
-    """
-    service = FileService()
-    existing = await service.get_by_id(file_id)
-
-    if not existing:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-
-    if existing.user_id != current_user.id:
+    if not stream:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет прав на редактирование этого файла"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл не найден в хранилище"
         )
 
-    file_entry = await service.update(file_id, file_data)
-    return file_entry
-
-
-@router.patch(
-    "/{file_id}",
-    response_model=FileResponse,
-    summary="Частичное обновление записи о файле",
-    description="Обновляет указанные поля записи о файле (PATCH). Доступ только для владельца файла.",
-    response_description="Данные обновленной записи о файле",
-    responses={
-        **get_auth_responses(401, 403, 404, 422),
-    },
-    openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
-)
-async def update_file_partial(
-    file_id: UUID,
-    file_data: FileUpdate,
-    current_user: UserDocument = Depends(get_current_user)
-):
-    """
-    Частичное обновление записи о файле.
-    Доступ: Private (только владелец)
-    """
-    service = FileService()
-    existing = await service.get_by_id(file_id)
-
-    if not existing:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-
-    if existing.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет прав на редактирование этого файла"
-        )
-
-    file_entry = await service.update(file_id, file_data)
-    return file_entry
+    return StreamingResponse(
+        content=stream.stream(32 * 1024),  # 32KB chunks
+        media_type=file_doc.mime_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{file_doc.original_name}"',
+            "Content-Length": str(file_doc.size),
+        }
+    )
 
 
 @router.delete(
     "/{file_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Удаление файла (Soft Delete)",
-    description="Помечает файл как удаленного (Soft Delete). Доступ только для владельца файла.",
+    summary="Удаление файла",
+    description="Удаляет файл (hard delete из MinIO + soft delete в MongoDB). "
+                "Доступно только владельцу файла.",
     responses={
         **get_auth_responses(401, 403, 404),
     },
@@ -206,23 +169,20 @@ async def delete_file(
     current_user: UserDocument = Depends(get_current_user)
 ):
     """
-    Удаление файла (Soft Delete).
+    Удаление файла.
     Доступ: Private (только владелец)
+    
+    - Файл удаляется из MinIO (hard delete)
+    - Метаданные помечаются как удалённые (soft delete) в MongoDB
+    - Кеш метаданных инвалидируется
     """
     service = FileService()
-    existing = await service.get_by_id(file_id)
+    deleted = await service.delete_file(file_id, current_user.id)
 
-    if not existing:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
-
-    if existing.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Нет прав на удаление этого файла"
-        )
-
-    deleted = await service.delete(file_id)
     if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Файл не найден"
+        )
 
     return None

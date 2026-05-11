@@ -1,5 +1,5 @@
 """
-Async router for user management with MongoDB.
+Async router for user management and profile with MongoDB.
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from uuid import UUID
@@ -7,7 +7,12 @@ from uuid import UUID
 from app.core.dependencies import get_current_user
 from app.models.user import UserDocument
 from app.services.user_service import UserService
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, PaginationParams, PaginatedResponse
+from app.services.file_service import FileService
+from app.schemas.user import (
+    UserCreate, UserUpdate, UserResponse, 
+    ProfileUpdate, ProfileResponse,
+    PaginationParams, PaginatedResponse
+)
 from app.schemas.common import get_auth_responses
 
 router = APIRouter(
@@ -68,6 +73,77 @@ async def get_users(
             "totalPages": total_pages,
         }
     }
+
+
+# Profile endpoints (must be before /{user_id} to avoid routing conflicts)
+
+@router.get(
+    "/profile",
+    response_model=ProfileResponse,
+    summary="Получение профиля текущего пользователя",
+    description="Возвращает расширенный профиль текущего авторизованного пользователя.",
+    response_description="Данные профиля пользователя",
+    responses={
+        **get_auth_responses(401),
+    },
+    openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
+)
+async def get_profile(
+    current_user: UserDocument = Depends(get_current_user)
+):
+    """
+    Получение профиля текущего пользователя.
+    Доступ: Private (только авторизованные)
+    """
+    service = UserService()
+    profile = await service.get_profile(current_user.id)
+    return profile
+
+
+@router.post(
+    "/profile",
+    response_model=ProfileResponse,
+    summary="Обновление профиля",
+    description="Обновляет профиль текущего пользователя. "
+                "Может включать avatarFileId для установки аватара. "
+                "Файл аватара должен принадлежать пользователю.",
+    response_description="Обновлённый профиль пользователя",
+    responses={
+        **get_auth_responses(401, 403, 404, 422),
+    },
+    openapi_extra={"security": [{"bearerAuth": []}, {"cookieAuth": []}]}
+)
+async def update_profile(
+    profile_data: ProfileUpdate,
+    current_user: UserDocument = Depends(get_current_user)
+):
+    """
+    Обновление профиля текущего пользователя.
+    Доступ: Private (только авторизованные)
+    
+    При установке avatarFileId система проверяет, что файл принадлежит пользователю.
+    """
+    service = UserService()
+
+    # If avatar_file_id is provided, verify ownership
+    if profile_data.avatar_file_id is not None:
+        file_service = FileService()
+        file_doc = await file_service.get_file_by_id(profile_data.avatar_file_id)
+        
+        if not file_doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Файл аватара не найден"
+            )
+        
+        if file_doc.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Файл аватара принадлежит другому пользователю"
+            )
+
+    profile = await service.update_profile(current_user.id, profile_data)
+    return profile
 
 
 @router.get(

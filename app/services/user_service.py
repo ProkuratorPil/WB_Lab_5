@@ -9,7 +9,10 @@ from fastapi import HTTPException, status
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
-from app.schemas.user import UserCreate, UserUpdate, UserResponse, PaginationParams
+from app.schemas.user import (
+    UserCreate, UserUpdate, UserResponse, 
+    ProfileUpdate, ProfileResponse, PaginationParams
+)
 from app.core.cache import cache_service
 from app.core.config import settings
 from app.models.user import UserDocument
@@ -124,3 +127,51 @@ class UserService:
             cache_service.delete(f"wp:users:profile:{user_id}")
         
         return result
+
+    async def get_profile(self, user_id: UUID) -> ProfileResponse:
+        """Get user profile with caching."""
+        cache_key = f"wp:users:profile:{user_id}"
+        cached = cache_service.get(cache_key)
+        if cached:
+            return ProfileResponse(**cached)
+
+        user = await self.get_by_id(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Пользователь не найден"
+            )
+
+        profile = ProfileResponse.model_validate(user)
+        cache_service.set(cache_key, profile.model_dump(mode="json"), ttl=settings.CACHE_TTL_DEFAULT)
+        return profile
+
+    async def update_profile(self, user_id: UUID, data: ProfileUpdate) -> ProfileResponse:
+        """Update user profile (including avatar)."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Пользователь не найден"
+            )
+
+        update_data = data.model_dump(exclude_unset=True)
+        update_data = {k: v for k, v in update_data.items() if v is not None}
+
+        if update_data:
+            updated_user = await user_crud.update_user(user_id, update_data)
+            if not updated_user:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Не удалось обновить профиль"
+                )
+            
+            # Invalidate profile and user caches
+            cache_service.delete(f"wp:users:profile:{user_id}")
+            cache_service.delete(f"wp:users:detail:{user_id}")
+            cache_service.delete_by_pattern("wp:users:list:*")
+
+            return ProfileResponse.model_validate(updated_user)
+
+        # No updates - return current profile
+        return ProfileResponse.model_validate(user)

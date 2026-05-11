@@ -25,6 +25,13 @@ class UserDocument(Document):
     yandex_id: Optional[str] = None
     vk_id: Optional[str] = None
     
+    # Profile fields
+    display_name: Optional[str] = Field(None, max_length=100)
+    bio: Optional[str] = Field(None, max_length=500)
+    
+    # Avatar
+    avatar_file_id: Optional[UUID] = None
+    
     # Account status
     is_active: bool = True
     is_verified: bool = False

@@ -11,6 +11,7 @@ from app.routers import file_router
 from app.routers.auth_router import router as auth_router
 from app.core.config import settings
 from app.core.database import init_db, close_db
+from app.services.minio_service import minio_service
 
 # Настройка логирования
 logging.basicConfig(
@@ -42,6 +43,13 @@ async def lifespan(app: FastAPI):
     """Управление жизненным циклом приложения."""
     logger.info("Starting application...")
     await init_db()
+    # Initialize MinIO
+    try:
+        await minio_service.initialize()
+        logger.info("MinIO initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize MinIO: {e}")
+        raise
     yield
     logger.info("Shutting down application...")
     await close_db()
@@ -50,7 +58,7 @@ async def lifespan(app: FastAPI):
 # В production отключаем документацию
 app = FastAPI(
     title="Lab Project API",
-    description="Документация API для лабораторных работ №2-№4",
+    description="Документация API для лабораторных работ №2-№7 (MinIO Object Storage)",
     version="1.0",
     docs_url=None if IS_PRODUCTION else "/docs",
     redoc_url=None,
@@ -67,7 +75,7 @@ if not IS_PRODUCTION:
         openapi_schema = get_openapi(
             title="Lab Project API",
             version="1.0",
-            description="Документация API для лабораторных работ №2-№4",
+            description="Документация API для лабораторных работ №2-№7 (MinIO Object Storage)",
             routes=app.routes,
         )
         if "components" not in openapi_schema:

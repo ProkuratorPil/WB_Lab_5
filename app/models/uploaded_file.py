@@ -10,15 +10,19 @@ from uuid import UUID, uuid4
 
 
 class UploadedFileDocument(Document):
-    """MongoDB document for uploaded files with soft delete support."""
+    """MongoDB document for uploaded files with soft delete support.
+    
+    Stores metadata about files uploaded to MinIO object storage.
+    The actual file data lives in MinIO, only metadata is stored here.
+    """
     
     id: UUID = Field(default_factory=uuid4, alias="_id")
-    filename: str = Field(...)
-    stored_filename: str = Field(...)
-    file_path: str = Field(...)
-    file_size: int = Field(...)
-    mime_type: str = Field(...)
     user_id: UUID = Field(...)
+    original_name: str = Field(...)
+    object_key: str = Field(...)
+    size: int = Field(...)
+    mime_type: str = Field(...)
+    bucket: str = Field(...)
     
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -30,6 +34,7 @@ class UploadedFileDocument(Document):
         indexes = [
             [("user_id", 1)],
             [("user_id", 1), ("deleted_at", 1)],
+            [("object_key", 1)],
         ]
 
     @before_event(Insert, Replace)

@@ -1,11 +1,9 @@
-# app/schemas/user.py
 from pydantic import BaseModel, Field, ConfigDict
 from uuid import UUID
 from datetime import datetime
 from typing import Optional
 
 
-# Схема для создания нового пользователя
 class UserCreate(BaseModel):
     username: str = Field(
         ...,
@@ -47,8 +45,7 @@ class UserCreate(BaseModel):
         example="+1234567890"
     )
 
-# Схема для обновления существующего пользователя
-# Все поля опциональны, чтобы поддерживать частичное обновление
+
 class UserUpdate(BaseModel):
     username: Optional[str] = Field(
         None,
@@ -89,7 +86,6 @@ class UserUpdate(BaseModel):
     )
 
 
-# Схема для ответа клиенту (не включает пароль)
 class UserResponse(BaseModel):
     id: UUID = Field(
         ...,
@@ -121,6 +117,10 @@ class UserResponse(BaseModel):
         description="Телефон пользователя (опционально)",
         example="+1234567890"
     )
+    avatar_file_id: Optional[UUID] = Field(
+        None,
+        description="ID файла аватара пользователя"
+    )
     is_active: bool = Field(
         True,
         description="Статус активности пользователя"
@@ -143,16 +143,53 @@ class UserResponse(BaseModel):
         description="Дата и время последнего обновления профиля",
         example="2024-01-02T15:30:00Z"
     )
-    # deleted_at не включаем в ответ для активных пользователей
 
-    model_config = ConfigDict(from_attributes=True)  # Позволяет ORM-объекту (User) маппиться на эту схему
+    model_config = ConfigDict(from_attributes=True)
 
-# Схема для параметров пагинации (остается без изменений)
+
+class ProfileUpdate(BaseModel):
+    """Schema for updating the user profile (including avatar)."""
+    display_name: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Отображаемое имя пользователя"
+    )
+    bio: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Краткая информация о пользователе"
+    )
+    avatar_file_id: Optional[UUID] = Field(
+        None,
+        description="UUID файла аватара (должен принадлежать пользователю)"
+    )
+
+
+class ProfileResponse(BaseModel):
+    """Schema for profile response with avatar info."""
+    id: UUID
+    username: str
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    avatar_file_id: Optional[UUID] = None
+    display_name: Optional[str] = None
+    bio: Optional[str] = None
+    is_active: bool = True
+    is_verified: bool = False
+    is_oauth_user: bool = False
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class PaginationParams(BaseModel):
-    page: int = Field(1, ge=1)  # По умолчанию первая страница
-    limit: int = Field(10, ge=1, le=100)  # По умолчанию 10 элементов, максимум 100
+    page: int = Field(1, ge=1)
+    limit: int = Field(10, ge=1, le=100)
 
-# Общая схема для ответа с пагинацией (тип данных в 'data' меняется на UserResponse)
+
 class PaginatedResponse(BaseModel):
-    data: list[UserResponse]  # <-- Изменили тип данных здесь
+    data: list[UserResponse]
     meta: dict
